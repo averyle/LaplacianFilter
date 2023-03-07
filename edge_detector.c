@@ -12,7 +12,7 @@
 #define FILTER_HEIGHT 3      
 
 #define RGB_COMPONENT_COLOR 255
-#define NUM_THREAD 2
+#define NUM_THREAD 10
 
 pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex2 = PTHREAD_MUTEX_INITIALIZER;
@@ -46,13 +46,14 @@ double total_elapsed_time = 0;
     The results are summed together to yield a single output value that is placed in the output image at the location of the pixel being processed on the input.
  */
 void *compute_laplacian_threadfn(void *params) {
+    pthread_mutex_lock(&mutex2);
     PPMPixel* image = ((struct parameter*) params)->image;
     PPMPixel* result = ((struct parameter*) params)->result;
     unsigned long int w = ((struct parameter*)params)->w;
     unsigned long int h = ((struct parameter*)params)->h;
     int startWork = ((struct parameter*)params)->start;
     int endWork = startWork + (((struct parameter*)params)->size);
-    printf("start work: %d, end work: %d\n", startWork, endWork);
+    printf("in compute_fn: start work: %d, end work: %d\n", startWork, endWork);
     int laplacian[FILTER_WIDTH][FILTER_HEIGHT] =
     {
         {-1, -1, -1},
@@ -68,13 +69,13 @@ void *compute_laplacian_threadfn(void *params) {
             // iterate through 2D laplacian array
             for (int i = 0; i < FILTER_HEIGHT; i++) {
                 for (int j = 0; j < FILTER_WIDTH; j++) {
+                    //pthread_mutex_lock(&mutex4);
                     x_coordinate = (col_iter - FILTER_WIDTH / 2 + j + w) % w;
                     y_coordinate = (row_iter - FILTER_HEIGHT / 2 + i + h) % h;
-                    // pthread_mutex_lock(&mutex1);
                     red+= image[y_coordinate * w + x_coordinate].r * laplacian[i][j];
                     green+= image[y_coordinate * w + x_coordinate].g * laplacian[i][j];
                     blue+= image[y_coordinate * w + x_coordinate].b * laplacian[i][j];
-                    // pthread_mutex_unlock(&mutex1);
+                    // pthread_mutex_unlock(&mutex4);
                 }
             }
             if (red > 255) red = 255;
@@ -88,12 +89,13 @@ void *compute_laplacian_threadfn(void *params) {
             result[row_iter * w + col_iter].g = green;
             result[row_iter * w + col_iter].b = blue;
 
+            // reset each pixel value
             red = 0;
             green = 0;
             blue = 0;
         }
     }
-    
+
     pthread_mutex_unlock(&mutex2);
     return NULL;
 }
@@ -109,31 +111,29 @@ PPMPixel *apply_filters(PPMPixel *image, unsigned long w, unsigned long h, doubl
     int work = h / NUM_THREAD;                                                // work each thread handles
     pthread_t t[NUM_THREAD];                                                  // create size number of threads
     struct parameter data;
-    PPMPixel* result = malloc(data.w * data.h * sizeof(PPMPixel));
     data.w = w;
     data.h = h;
-    data.result = result;
+    data.result = malloc(data.w * data.h * sizeof(PPMPixel));
     
     for(int i = 0; i < NUM_THREAD; i++) {
-        pthread_mutex_lock(&mutex2);                                           // lock data before accessing/changing
+
         data.size = work;
+
         if ((i == NUM_THREAD - 1) && (NUM_THREAD > 1)) {                       // set the work of last thread to equal height - last starting point
             data.size = data.h - data.start;
         } else if (i == 0) {
-            data.start = 0;
+            data.start = 0;                                                    // set the starting point of first thread to be 0
         }
         else {
             data.start+= work;                                                 // increment the starting point by *work* amount of rows
         }
 
-        printf("thread: %d, start: %ld\n", i, data.start);
+        printf("thread: %d, start row: %ld, size:%ld\n", i, data.start, data.size);
 
         if (pthread_create(&t[i], NULL, compute_laplacian_threadfn, (void*) &data) != 0)         // create thread and each thread calls compute_laplacian_threadfn
-            printf("Unable to create thread %d\n", i);                                             
-
-        // pthread_mutex_unlock(&mutex2);
-
+            printf("Unable to create thread %d\n", i);
     }
+
     for(int i = 0; i<NUM_THREAD; i++)
         pthread_join(t[i], NULL);                                             // join threads
 
@@ -141,8 +141,8 @@ PPMPixel *apply_filters(PPMPixel *image, unsigned long w, unsigned long h, doubl
     long sec = end.tv_sec - begin.tv_sec;
     long microsec = end.tv_usec - begin.tv_usec;
     *elapsedTime = sec + microsec*1e-6;
-    printf("elapsed time: %.4f\n", *elapsedTime);
-    return result;
+    
+    return data.result;
 }
 
 /*Create a new P6 file to save the filtered image in. Write the header block
@@ -265,17 +265,19 @@ PPMPixel *read_image(const char *filename, unsigned long int *width, unsigned lo
 */
 void *manage_image_file(void *args) {
     printf("debugging: in manage_file\n");
-    pthread_mutex_lock(&mutex1);
+    pthread_mutex_lock(&mutex1);                                    // lock data before accessing
 
     struct parameter data;
     data.image = read_image(((struct file_name_args*) args)->input_file_name, &data.w, &data.h);
     data.result = apply_filters(data.image, data.w, data.h, (void*) &total_elapsed_time);
     write_image(data.result,((struct file_name_args*) args)->output_file_name, data.w, data.h);
 
-    pthread_mutex_unlock(&mutex1);
-
     free(data.image);
     free(data.result);
+
+    pthread_mutex_unlock(&mutex1);
+
+    return NULL;
 }
 /*The driver of the program. Check for the correct number of arguments. If wrong print the message: "Usage ./a.out filename[s]"
   It shall accept n filenames as arguments, separated by whitespace, e.g., ./a.out file1.ppm file2.ppm    file3.ppm
@@ -284,17 +286,16 @@ void *manage_image_file(void *args) {
   The total elapsed time is the total time taken by all threads to compute the edge detection of all input images .
  */
 int main(int argc, char *argv[]) {
-    FILE *fp;
-    PPMPixel *img;
-    unsigned long int width;
-    unsigned long int height;
-    struct file_name_args arguments;
+    printf("debugging: in main\n");
     if (argc < 2) {
-        printf("Usage: ./edge_detector filename[s]");
+        printf("Usage: ./a.out filename[s]");
         exit(1);
     }
+    FILE *fp;
+    PPMPixel *img;
     pthread_t t[argc-1];
     for (int i = 1; i < argc; i++) {
+        struct file_name_args arguments;
         arguments.input_file_name = argv[i];
         snprintf(arguments.output_file_name, sizeof(arguments.output_file_name) + sizeof(int), "laplacian%d.ppm", i);
         if (pthread_create(&t[i-1], NULL, manage_image_file, (void*) &arguments) !=0) {
@@ -305,7 +306,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < argc - 1; i++) {
         pthread_join(t[i], NULL);
     }
-    
+
+    printf("elapsed time: %.4f\n", total_elapsed_time);
     return 0;
 }
-
