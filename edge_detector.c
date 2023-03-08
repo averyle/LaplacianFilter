@@ -3,19 +3,21 @@
 #include <math.h>
 #include <sys/time.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <string.h>
 
-#define LAPLACIAN_THREADS 4     //change the number of threads as you run your concurrency experiment
+#define LAPLACIAN_THREADS 10     //change the number of threads as you run your concurrency experiment
 
 /* Laplacian filter is 3 by 3 */
 #define FILTER_WIDTH 3       
 #define FILTER_HEIGHT 3      
 
 #define RGB_COMPONENT_COLOR 255
-#define NUM_THREAD 10
 
 pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex2 = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex3 = PTHREAD_MUTEX_INITIALIZER;
+
 
 typedef struct {
     unsigned char r, g, b;
@@ -46,14 +48,15 @@ double total_elapsed_time = 0;
     The results are summed together to yield a single output value that is placed in the output image at the location of the pixel being processed on the input.
  */
 void *compute_laplacian_threadfn(void *params) {
-    pthread_mutex_lock(&mutex2);
     PPMPixel* image = ((struct parameter*) params)->image;
     PPMPixel* result = ((struct parameter*) params)->result;
     unsigned long int w = ((struct parameter*)params)->w;
     unsigned long int h = ((struct parameter*)params)->h;
     int startWork = ((struct parameter*)params)->start;
     int endWork = startWork + (((struct parameter*)params)->size);
-    printf("in compute_fn: start work: %d, end work: %d\n", startWork, endWork);
+
+    printf("compute starting from: %d, ending at: %d\n", startWork, endWork);
+
     int laplacian[FILTER_WIDTH][FILTER_HEIGHT] =
     {
         {-1, -1, -1},
@@ -61,23 +64,23 @@ void *compute_laplacian_threadfn(void *params) {
         {-1, -1, -1}
     };
 
-    int red, green, blue;
-    int x_coordinate, y_coordinate;
+    int red, green, blue = 0;
+    int x_coordinate, y_coordinate = 0;
 
     for (int row_iter = startWork; row_iter < endWork; row_iter++) {                            // iterate through the number of rows (ie. 1-> work)
-        for (int col_iter = 0; col_iter < w; col_iter++) {                                      // iterate through the row (ie. 0->width)
-            // iterate through 2D laplacian array
-            for (int i = 0; i < FILTER_HEIGHT; i++) {
+        if (row_iter == h) break;
+        for (int col_iter = 0; col_iter < w; col_iter++) {                                     // iterate through the row (ie. 0->width)
+            for (int i = 0; i < FILTER_HEIGHT; i++) {                                           // iterate through 2D laplacian array
                 for (int j = 0; j < FILTER_WIDTH; j++) {
-                    //pthread_mutex_lock(&mutex4);
                     x_coordinate = (col_iter - FILTER_WIDTH / 2 + j + w) % w;
                     y_coordinate = (row_iter - FILTER_HEIGHT / 2 + i + h) % h;
                     red+= image[y_coordinate * w + x_coordinate].r * laplacian[i][j];
                     green+= image[y_coordinate * w + x_coordinate].g * laplacian[i][j];
-                    blue+= image[y_coordinate * w + x_coordinate].b * laplacian[i][j];
-                    // pthread_mutex_unlock(&mutex4);
+                    blue+= image[y_coordinate * w + x_coordinate].b * laplacian[i][j]; 
                 }
             }
+
+            // Truncate values smaller than zero to zero and larger than 255 to 255.
             if (red > 255) red = 255;
             else if (red < 0) red = 0;
             if (green > 255) green = 255;
@@ -95,8 +98,7 @@ void *compute_laplacian_threadfn(void *params) {
             blue = 0;
         }
     }
-
-    pthread_mutex_unlock(&mutex2);
+    pthread_mutex_unlock(&mutex3);
     return NULL;
 }
 
@@ -108,34 +110,32 @@ void *compute_laplacian_threadfn(void *params) {
 PPMPixel *apply_filters(PPMPixel *image, unsigned long w, unsigned long h, double *elapsedTime) {
     struct timeval begin, end;
     gettimeofday(&begin, 0);
-    int work = h / NUM_THREAD;                                                // work each thread handles
-    pthread_t t[NUM_THREAD];                                                  // create size number of threads
+    int work = h / LAPLACIAN_THREADS;                                                // work each thread handles
+    pthread_t t[LAPLACIAN_THREADS];                                                  // create size number of threads
     struct parameter data;
     data.w = w;
     data.h = h;
     data.result = malloc(data.w * data.h * sizeof(PPMPixel));
-    
-    for(int i = 0; i < NUM_THREAD; i++) {
+    data.image = image;
 
+    for(int i = 0; i < LAPLACIAN_THREADS; i++) {
+        pthread_mutex_lock(&mutex3);
         data.size = work;
-
-        if ((i == NUM_THREAD - 1) && (NUM_THREAD > 1)) {                       // set the work of last thread to equal height - last starting point
+        if (i == LAPLACIAN_THREADS - 1) {                                                               // set the work of last thread to equal height - last starting point
             data.size = data.h - data.start;
         } else if (i == 0) {
-            data.start = 0;                                                    // set the starting point of first thread to be 0
+            data.start = 0;
         }
         else {
-            data.start+= work;                                                 // increment the starting point by *work* amount of rows
+            data.start += work;                                                                  // increment the starting point by *work* amount of rows
         }
-
-        printf("thread: %d, start row: %ld, size:%ld\n", i, data.start, data.size);
 
         if (pthread_create(&t[i], NULL, compute_laplacian_threadfn, (void*) &data) != 0)         // create thread and each thread calls compute_laplacian_threadfn
             printf("Unable to create thread %d\n", i);
     }
 
-    for(int i = 0; i<NUM_THREAD; i++)
-        pthread_join(t[i], NULL);                                             // join threads
+    for(int i = 0; i<LAPLACIAN_THREADS; i++)
+        pthread_join(t[i], NULL);                                                                // join threads
 
     gettimeofday(&end, 0);
     long sec = end.tv_sec - begin.tv_sec;
@@ -252,6 +252,7 @@ PPMPixel *read_image(const char *filename, unsigned long int *width, unsigned lo
         }
         img[i] = *pixel;
     }
+
     free(pixel);
     fclose(fp);
     return img;
@@ -264,8 +265,7 @@ PPMPixel *read_image(const char *filename, unsigned long int *width, unsigned lo
  Example: the result image of the file passed third during the input shall be called "laplacian3.ppm".
 */
 void *manage_image_file(void *args) {
-    printf("debugging: in manage_file\n");
-    pthread_mutex_lock(&mutex1);                                    // lock data before accessing
+    pthread_mutex_lock(&mutex2);                                    // lock data before accessing
 
     struct parameter data;
     data.image = read_image(((struct file_name_args*) args)->input_file_name, &data.w, &data.h);
@@ -275,7 +275,7 @@ void *manage_image_file(void *args) {
     free(data.image);
     free(data.result);
 
-    pthread_mutex_unlock(&mutex1);
+    pthread_mutex_unlock(&mutex2);
 
     return NULL;
 }
@@ -286,7 +286,6 @@ void *manage_image_file(void *args) {
   The total elapsed time is the total time taken by all threads to compute the edge detection of all input images .
  */
 int main(int argc, char *argv[]) {
-    printf("debugging: in main\n");
     if (argc < 2) {
         printf("Usage: ./a.out filename[s]");
         exit(1);
@@ -294,7 +293,9 @@ int main(int argc, char *argv[]) {
     FILE *fp;
     PPMPixel *img;
     pthread_t t[argc-1];
+    // sem_init(&semaphore, 0, LAPLACIAN_THREADS);
     for (int i = 1; i < argc; i++) {
+       // pthread_mutex_lock(&mutex1);
         struct file_name_args arguments;
         arguments.input_file_name = argv[i];
         snprintf(arguments.output_file_name, sizeof(arguments.output_file_name) + sizeof(int), "laplacian%d.ppm", i);
