@@ -6,18 +6,13 @@
 #include <semaphore.h>
 #include <string.h>
 
-#define LAPLACIAN_THREADS 10     //change the number of threads as you run your concurrency experiment
+#define LAPLACIAN_THREADS 10    //change the number of threads as you run your concurrency experiment
 
 /* Laplacian filter is 3 by 3 */
 #define FILTER_WIDTH 3       
 #define FILTER_HEIGHT 3      
 
 #define RGB_COMPONENT_COLOR 255
-
-pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex2 = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex3 = PTHREAD_MUTEX_INITIALIZER;
-
 
 typedef struct {
     unsigned char r, g, b;
@@ -55,8 +50,6 @@ void *compute_laplacian_threadfn(void *params) {
     int startWork = ((struct parameter*)params)->start;
     int endWork = startWork + (((struct parameter*)params)->size);
 
-    printf("compute starting from: %d, ending at: %d\n", startWork, endWork);
-
     int laplacian[FILTER_WIDTH][FILTER_HEIGHT] =
     {
         {-1, -1, -1},
@@ -64,8 +57,11 @@ void *compute_laplacian_threadfn(void *params) {
         {-1, -1, -1}
     };
 
-    int red, green, blue = 0;
-    int x_coordinate, y_coordinate = 0;
+    int red = 0;
+    int green = 0;
+    int blue = 0;
+    int x_coordinate = 0;
+    int y_coordinate = 0;
 
     for (int row_iter = startWork; row_iter < endWork; row_iter++) {                            // iterate through the number of rows (ie. 1-> work)
         if (row_iter == h) break;
@@ -87,7 +83,7 @@ void *compute_laplacian_threadfn(void *params) {
             else if (green < 0) green = 0;
             if (blue > 255) blue = 255;
             else if (blue < 0) blue = 0;
-
+            
             result[row_iter * w + col_iter].r = red;
             result[row_iter * w + col_iter].g = green;
             result[row_iter * w + col_iter].b = blue;
@@ -98,7 +94,7 @@ void *compute_laplacian_threadfn(void *params) {
             blue = 0;
         }
     }
-    pthread_mutex_unlock(&mutex3);
+
     return NULL;
 }
 
@@ -110,39 +106,39 @@ void *compute_laplacian_threadfn(void *params) {
 PPMPixel *apply_filters(PPMPixel *image, unsigned long w, unsigned long h, double *elapsedTime) {
     struct timeval begin, end;
     gettimeofday(&begin, 0);
+    int start = 0;
     int work = h / LAPLACIAN_THREADS;                                                // work each thread handles
     pthread_t t[LAPLACIAN_THREADS];                                                  // create size number of threads
-    struct parameter data;
-    data.w = w;
-    data.h = h;
-    data.result = malloc(data.w * data.h * sizeof(PPMPixel));
-    data.image = image;
+    struct parameter data[LAPLACIAN_THREADS];
+    PPMPixel* result =  malloc(w * h * sizeof(PPMPixel));
+    for (int ii = 0; ii < LAPLACIAN_THREADS; ii++) {
+        data[ii].w = w;
+        data[ii].h = h;
+        data[ii].start = start;
+        data[ii].result = result;
+        data[ii].image = image;
+        data[ii].size = work;
+        if ((ii == LAPLACIAN_THREADS - 1) && ((start + work) > h)) {                                                         // set the work of last thread to equal height - last starting point
+            data[ii].size = h - start;
+        }
+        start = start + work;
+    }
 
     for(int i = 0; i < LAPLACIAN_THREADS; i++) {
-        pthread_mutex_lock(&mutex3);
-        data.size = work;
-        if (i == LAPLACIAN_THREADS - 1) {                                                               // set the work of last thread to equal height - last starting point
-            data.size = data.h - data.start;
-        } else if (i == 0) {
-            data.start = 0;
-        }
-        else {
-            data.start += work;                                                                  // increment the starting point by *work* amount of rows
-        }
-
-        if (pthread_create(&t[i], NULL, compute_laplacian_threadfn, (void*) &data) != 0)         // create thread and each thread calls compute_laplacian_threadfn
+        if (pthread_create(&t[i], NULL, compute_laplacian_threadfn, (void*) &data[i]) != 0)       // create thread and each thread calls compute_laplacian_threadfn
             printf("Unable to create thread %d\n", i);
     }
 
-    for(int i = 0; i<LAPLACIAN_THREADS; i++)
-        pthread_join(t[i], NULL);                                                                // join threads
+    for(int i = 0; i < LAPLACIAN_THREADS; i++) {
+        pthread_join(t[i], NULL);                                                                  // join threads
+    }
 
     gettimeofday(&end, 0);
     long sec = end.tv_sec - begin.tv_sec;
     long microsec = end.tv_usec - begin.tv_usec;
     *elapsedTime = sec + microsec*1e-6;
     
-    return data.result;
+    return result;
 }
 
 /*Create a new P6 file to save the filtered image in. Write the header block
@@ -265,18 +261,14 @@ PPMPixel *read_image(const char *filename, unsigned long int *width, unsigned lo
  Example: the result image of the file passed third during the input shall be called "laplacian3.ppm".
 */
 void *manage_image_file(void *args) {
-    pthread_mutex_lock(&mutex2);                                    // lock data before accessing
-
     struct parameter data;
     data.image = read_image(((struct file_name_args*) args)->input_file_name, &data.w, &data.h);
-    data.result = apply_filters(data.image, data.w, data.h, (void*) &total_elapsed_time);
+    data.result = apply_filters(data.image, data.w, data.h, &total_elapsed_time);
+
     write_image(data.result,((struct file_name_args*) args)->output_file_name, data.w, data.h);
 
     free(data.image);
     free(data.result);
-
-    pthread_mutex_unlock(&mutex2);
-
     return NULL;
 }
 /*The driver of the program. Check for the correct number of arguments. If wrong print the message: "Usage ./a.out filename[s]"
@@ -293,17 +285,18 @@ int main(int argc, char *argv[]) {
     FILE *fp;
     PPMPixel *img;
     pthread_t t[argc-1];
-    // sem_init(&semaphore, 0, LAPLACIAN_THREADS);
+    struct file_name_args arguments[argc-1];
+    int err = 0;
+    for (int i = 0; i < argc - 1; i++) {
+        arguments[i].input_file_name = argv[i+1];
+        snprintf(arguments[i].output_file_name, sizeof(arguments[i].output_file_name) + sizeof(int), "laplacian%d.ppm", (i+1));
+    }
     for (int i = 1; i < argc; i++) {
-       // pthread_mutex_lock(&mutex1);
-        struct file_name_args arguments;
-        arguments.input_file_name = argv[i];
-        snprintf(arguments.output_file_name, sizeof(arguments.output_file_name) + sizeof(int), "laplacian%d.ppm", i);
-        if (pthread_create(&t[i-1], NULL, manage_image_file, (void*) &arguments) !=0) {
+        err = pthread_create(&t[i-1], NULL, manage_image_file, (void*) &arguments[i-1]);
+        if (err !=0) {
             perror("cannot create thread\n");
         }
     }
-
     for (int i = 0; i < argc - 1; i++) {
         pthread_join(t[i], NULL);
     }
